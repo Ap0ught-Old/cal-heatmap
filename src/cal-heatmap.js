@@ -62,10 +62,27 @@ var CalHeatMap = function() {
 
 		maxDate: null,
 
+		// ================================================
+		// DATA
+		// ================================================
+
+		// Data source
 		// URL, where to fetch the original datas
 		data: "",
 
+		// Data type
+		// Default: json
 		dataType: this.allowedDataType[0],
+
+		// Payload sent when using POST http method
+		// Leave to null (default) for GET request
+		// Expect a string, formatted like "a=b;c=d"
+		dataPostPayload: null,
+
+		// Additional headers sent when requesting data
+		// Expect an object formatted like:
+		// { 'X-CSRF-TOKEN': 'token' }
+		dataRequestHeaders: null,
 
 		// Whether to consider missing date:value from the datasource
 		// as equal to 0, or just leave them as missing
@@ -244,6 +261,9 @@ var CalHeatMap = function() {
 		// Takes the fetched "data" object as argument, must return a json object
 		// formatted like {timestamp:count, timestamp2:count2},
 		afterLoadData: function(data) { return data; },
+
+		// Callback triggered after calling and completing update().
+		afterUpdate: null,
 
 		// Callback triggered after calling next().
 		// The `status` argument is equal to true if there is no
@@ -430,7 +450,7 @@ var CalHeatMap = function() {
 				case "year":
 					return self._domainType.week.maxItemNumber;
 				case "month":
-					return self.getWeekNumber(new Date(d.getFullYear(), d.getMonth()+1, 0)) - self.getWeekNumber(d);
+					return self.options.domainDynamicDimension ? self.getWeekNumber(new Date(d.getFullYear(), d.getMonth()+1, 0)) - self.getWeekNumber(d) : 5;
 				}
 			},
 			defaultRowNumber: 1,
@@ -452,12 +472,12 @@ var CalHeatMap = function() {
 			format: {
 				date: "%B Week #%W",
 				legend: "%B Week #%W",
-				connector: "on"
+				connector: "in"
 			},
 			extractUnit: function(d) {
 				var dt = new Date(d.getFullYear(), d.getMonth(), d.getDate());
 				// According to ISO-8601, week number computation are based on week starting on Monday
-				var weekDay = dt.getDay()-1;
+				var weekDay = dt.getDay() - (self.options.weekStartOnMonday ? 1 : 0);
 				if (weekDay < 0) {
 					weekDay = 6;
 				}
@@ -480,7 +500,7 @@ var CalHeatMap = function() {
 			format: {
 				date: "%B %Y",
 				legend: "%B",
-				connector: "on"
+				connector: "in"
 			},
 			extractUnit: function(d) {
 				return new Date(d.getFullYear(), d.getMonth()).getTime();
@@ -498,7 +518,7 @@ var CalHeatMap = function() {
 			format: {
 				date: "%Y",
 				legend: "%Y",
-				connector: "on"
+				connector: "in"
 			},
 			extractUnit: function(d) {
 				return new Date(d.getFullYear()).getTime();
@@ -519,7 +539,7 @@ var CalHeatMap = function() {
 				column: d.row,
 				position: {
 					x: d.position.y,
-					y: d.position.x,
+					y: d.position.x
 				},
 				format: d.format,
 				extractUnit: d.extractUnit
@@ -854,17 +874,32 @@ var CalHeatMap = function() {
 
 				if (options.tooltip) {
 					selection.on("mouseover", function(d) {
-						var domainNode = this.parentNode.parentNode.parentNode;
+						var domainNode = this.parentNode.parentNode;
 
 						self.tooltip
 						.html(self.getSubDomainTitle(d))
 						.attr("style", "display: block;")
 						;
 
+						var tooltipPositionX = self.positionSubDomainX(d.t) - self.tooltip[0][0].offsetWidth/2 + options.cellSize/2;
+						var tooltipPositionY = self.positionSubDomainY(d.t) - self.tooltip[0][0].offsetHeight - options.cellSize/2;
+
+						// Offset by the domain position
+						tooltipPositionX += parseInt(domainNode.getAttribute("x"), 10);
+						tooltipPositionY += parseInt(domainNode.getAttribute("y"), 10);
+
+						// Offset by the calendar position (when legend is left/top)
+						tooltipPositionX += parseInt(self.root.select(".graph").attr("x"), 10);
+						tooltipPositionY += parseInt(self.root.select(".graph").attr("y"), 10);
+
+						// Offset by the inside domain position (when label is left/top)
+						tooltipPositionX += parseInt(domainNode.parentNode.getAttribute("x"), 10);
+						tooltipPositionY += parseInt(domainNode.parentNode.getAttribute("y"), 10);
+
 						self.tooltip.attr("style",
-							"display: block; " +
-							"left: " + (self.positionSubDomainX(d.t) - self.tooltip[0][0].offsetWidth/2 + options.cellSize/2 + parseInt(domainNode.getAttribute("x"), 10)) + "px; " +
-							"top: " + (self.positionSubDomainY(d.t) - self.tooltip[0][0].offsetHeight - options.cellSize/2 + parseInt(domainNode.getAttribute("y"), 10)) + "px;")
+						"display: block; " +
+						"left: " + tooltipPositionX + "px; " +
+						"top: " + tooltipPositionY + "px;")
 						;
 					});
 
@@ -1079,7 +1114,7 @@ CalHeatMap.prototype = {
 		}
 
 		if (d3.select(options.itemSelector)[0][0] === null) {
-			throw new Error("The node '" + options.itemSelector + "' specified in itemSelector does not exists");
+			throw new Error("The node '" + options.itemSelector + "' specified in itemSelector does not exist");
 		}
 
 		try {
@@ -1102,7 +1137,7 @@ CalHeatMap.prototype = {
 		}
 
 		// Don't touch these settings
-		var s = ["data", "onComplete", "onClick", "afterLoad", "afterLoadData", "afterLoadPreviousDomain", "afterLoadNextDomain"];
+		var s = ["data", "onComplete", "onClick", "afterLoad", "afterLoadData", "afterLoadPreviousDomain", "afterLoadNextDomain", "afterUpdate"];
 
 		for (var k in s) {
 			if (settings.hasOwnProperty(s[k])) {
@@ -1363,7 +1398,15 @@ CalHeatMap.prototype = {
 			}
 
 			element.attr("fill", function(d) {
-				if (d.v === 0 && options.legendColors !== null && options.legendColors.hasOwnProperty("empty")) {
+				if (d.v === null && (options.hasOwnProperty("considerMissingDataAsZero") && !options.considerMissingDataAsZero)) {
+					if (options.legendColors.hasOwnProperty("base")) {
+						return options.legendColors.base;
+					}
+				}
+
+				if (options.legendColors !== null && options.legendColors.hasOwnProperty("empty") &&
+					(d.v === 0 || (d.v === null && options.hasOwnProperty("considerMissingDataAsZero") && options.considerMissingDataAsZero))
+				) {
 					return options.legendColors.empty;
 				}
 
@@ -1378,24 +1421,33 @@ CalHeatMap.prototype = {
 		rect.transition().duration(options.animationDuration).select("rect")
 			.attr("class", function(d) {
 
-				var htmlClass = parent.getHighlightClassName(d.t);
+				var htmlClass = parent.getHighlightClassName(d.t).trim().split(" ");
+				var pastDate = parent.dateIsLessThan(d.t, new Date());
+        var sameDate = parent.dateIsEqual(d.t, new Date());
 
-				if (parent.legendScale === null) {
-					htmlClass += " graph-rect";
+				if (parent.legendScale === null ||
+					(d.v === null && (options.hasOwnProperty("considerMissingDataAsZero") && !options.considerMissingDataAsZero) &&!options.legendColors.hasOwnProperty("base"))
+				) {
+					htmlClass.push("graph-rect");
 				}
 
+        if (sameDate) {
+          htmlClass.push("now");
+        } else if (!pastDate) {
+          htmlClass.push("future");
+        }
+
 				if (d.v !== null) {
-					htmlClass += " " + parent.Legend.getClass(d.v, (parent.legendScale === null));
-				} else if (options.considerMissingDataAsZero &&
-					parent.dateIsLessThan(d.t, new Date())) {
-					htmlClass += " " + parent.Legend.getClass(0, (parent.legendScale === null));
+					htmlClass.push(parent.Legend.getClass(d.v, (parent.legendScale === null)));
+				} else if (options.considerMissingDataAsZero && pastDate) {
+					htmlClass.push(parent.Legend.getClass(0, (parent.legendScale === null)));
 				}
 
 				if (options.onClick !== null) {
-					htmlClass += " hover_cursor";
+					htmlClass.push("hover_cursor");
 				}
 
-				return htmlClass;
+				return htmlClass.join(" ");
 			})
 			.call(addStyle)
 		;
@@ -1419,6 +1471,26 @@ CalHeatMap.prototype = {
 			.attr("class", function(d) { return "subdomain-text" + parent.getHighlightClassName(d.t); })
 			.call(formatSubDomainText)
 		;
+	},
+
+	/**
+	 * Sprintf like function.
+	 * Replaces placeholders {0} in string with values from provided object.
+	 *
+	 * @param string formatted String containing placeholders.
+	 * @param object args Object with properties to replace placeholders in string.
+	 *
+	 * @return String
+	 */
+	formatStringWithObject: function (formatted, args) {
+		"use strict";
+		for (var prop in args) {
+			if (args.hasOwnProperty(prop)) {
+				var regexp = new RegExp("\\{" + prop + "\\}", "gi");
+				formatted = formatted.replace(regexp, args[prop]);
+			}
+		}
+		return formatted;
 	},
 
 	// =========================================================================//
@@ -1567,6 +1639,12 @@ CalHeatMap.prototype = {
 		}
 	},
 
+	afterUpdate: function() {
+		"use strict";
+
+		return this.triggerEvent("afterUpdate");
+	},
+
 	// =========================================================================//
 	// FORMATTER																//
 	// =========================================================================//
@@ -1592,7 +1670,7 @@ CalHeatMap.prototype = {
 		"use strict";
 
 		if (d.v === null && !this.options.considerMissingDataAsZero) {
-			return (this.options.subDomainTitleFormat.empty).format({
+			return this.formatStringWithObject(this.options.subDomainTitleFormat.empty , {
 				date: this.formatDate(new Date(d.t), this.options.subDomainDateFormat)
 			});
 		} else {
@@ -1602,7 +1680,7 @@ CalHeatMap.prototype = {
 				value = 0;
 			}
 
-			return (this.options.subDomainTitleFormat.filled).format({
+			return this.formatStringWithObject(this.options.subDomainTitleFormat.filled, {
 				count: this.formatNumber(value),
 				name: this.options.itemName[(value !== 1 ? 1: 0)],
 				connector: this._domainType[this.options.subDomain].format.connector,
@@ -1826,8 +1904,8 @@ CalHeatMap.prototype = {
 
 		if (this.options.highlight.length > 0) {
 			for (var i in this.options.highlight) {
-				if (this.options.highlight[i] instanceof Date && this.dateIsEqual(this.options.highlight[i], d)) {
-					return " highlight" + (this.isNow(this.options.highlight[i]) ? " now": "");
+				if (this.dateIsEqual(this.options.highlight[i], d)) {
+					return this.isNow(this.options.highlight[i]) ? " highlight-now": " highlight";
 				}
 			}
 		}
@@ -1859,6 +1937,14 @@ CalHeatMap.prototype = {
 	/* jshint maxcomplexity: false */
 	dateIsEqual: function(dateA, dateB) {
 		"use strict";
+
+		if(!(dateA instanceof Date)) {
+			dateA = new Date(dateA);
+		}
+
+		if (!(dateB instanceof Date)) {
+			dateB = new Date(dateB);
+		}
 
 		switch(this.options.subDomain) {
 		case "x_min":
@@ -1894,7 +1980,7 @@ CalHeatMap.prototype = {
 
 
 	/**
-	 * Returns weather or not dateA is less than or equal to dateB. This function is subdomain aware.
+	 * Returns wether or not dateA is less than or equal to dateB. This function is subdomain aware.
 	 * Performs automatic conversion of values.
 	 * @param dateA may be a number or a Date
 	 * @param dateB may be a number or a Date
@@ -2442,7 +2528,7 @@ CalHeatMap.prototype = {
 		if (arguments.length < 6) {
 			updateMode = this.APPEND_ON_UPDATE;
 		}
-		var _callback = function(data) {
+		var _callback = function(error, data) {
 			if (afterLoad !== false) {
 				if (typeof afterLoad === "function") {
 					data = afterLoad(data);
@@ -2463,33 +2549,55 @@ CalHeatMap.prototype = {
 		switch(typeof source) {
 		case "string":
 			if (source === "") {
-				_callback({});
+				_callback(null, {});
 				return true;
 			} else {
+				var url = this.parseURI(source, startDate, endDate);
+				var requestType = "GET";
+				if (self.options.dataPostPayload !== null ) {
+					requestType = "POST";
+				}
+				var payload = null;
+				if (self.options.dataPostPayload !== null) {
+					payload = this.parseURI(self.options.dataPostPayload, startDate, endDate);
+				}
+
+				var xhr = null;
 				switch(this.options.dataType) {
 				case "json":
-					d3.json(this.parseURI(source, startDate, endDate), _callback);
+					xhr = d3.json(url);
 					break;
 				case "csv":
-					d3.csv(this.parseURI(source, startDate, endDate), _callback);
+					xhr = d3.csv(url);
 					break;
 				case "tsv":
-					d3.tsv(this.parseURI(source, startDate, endDate), _callback);
+					xhr = d3.tsv(url);
 					break;
 				case "txt":
-					d3.text(this.parseURI(source, startDate, endDate), "text/plain", _callback);
+					xhr = d3.text(url, "text/plain");
 					break;
 				}
+
+				// jshint maxdepth:5
+				if (self.options.dataRequestHeaders !== null) {
+					for (var header in self.options.dataRequestHeaders) {
+						if (self.options.dataRequestHeaders.hasOwnProperty(header)) {
+							xhr.header(header, self.options.dataRequestHeaders[header]);
+						}
+					}
+				}
+
+				xhr.send(requestType, payload, _callback);
 			}
 			return false;
 		case "object":
 			if (source === Object(source)) {
-				_callback(source);
+				_callback(null, source);
 				return false;
 			}
 			/* falls through */
 		default:
-			_callback({});
+			_callback(null, {});
 			return true;
 		}
 	},
@@ -2726,6 +2834,9 @@ CalHeatMap.prototype = {
 	update: function(dataSource, afterLoad, updateMode) {
 		"use strict";
 
+		if (arguments.length === 0) {
+			dataSource = this.options.data;
+		}
 		if (arguments.length < 2) {
 			afterLoad = true;
 		}
@@ -2741,6 +2852,7 @@ CalHeatMap.prototype = {
 			this.getSubDomain(domains[domains.length-1]).pop(),
 			function() {
 				self.fill();
+				self.afterUpdate();
 			},
 			afterLoad,
 			updateMode
@@ -2846,7 +2958,7 @@ CalHeatMap.prototype = {
 			.each("end", function() {
 				if (typeof callback === "function") {
 					callback();
-				} else if (arguments.length > 0) {
+				} else if (typeof callback !== "undefined") {
 					console.log("Provided callback for destroy() is not a function.");
 				}
 			})
@@ -2864,8 +2976,10 @@ CalHeatMap.prototype = {
 			".graph-rect": {},
 			"rect.highlight": {},
 			"rect.now": {},
+			"rect.highlight-now": {},
 			"text.highlight": {},
 			"text.now": {},
+			"text.highlight-now": {},
 			".domain-background": {},
 			".graph-label": {},
 			".subdomain-text": {},
@@ -3156,17 +3270,17 @@ Legend.prototype.redraw = function(width) {
 
 	legendItem.select("title").text(function(d, i) {
 		if (i === 0) {
-			return (options.legendTitleFormat.lower).format({
+			return calendar.formatStringWithObject(options.legendTitleFormat.lower, {
 				min: options.legend[i],
 				name: options.itemName[1]
 			});
 		} else if (i === _legend.length-1) {
-			return (options.legendTitleFormat.upper).format({
+			return calendar.formatStringWithObject(options.legendTitleFormat.upper, {
 				max: options.legend[i-1],
 				name: options.itemName[1]
 			});
 		} else {
-			return (options.legendTitleFormat.inner).format({
+			return calendar.formatStringWithObject(options.legendTitleFormat.inner, {
 				down: options.legend[i-1],
 				up: options.legend[i],
 				name: options.itemName[1]
@@ -3262,7 +3376,7 @@ Legend.prototype.buildColors = function() {
 
 	if (_legend[0] > 0) {
 		_legend.unshift(0);
-	} else if (_legend[0] < 0) {
+	} else if (_legend[0] <= 0) {
 		// Let's guess the leftmost value, it we have to add one
 		_legend.unshift(_legend[0] - (_legend[_legend.length-1] - _legend[0])/_legend.length);
 	}
@@ -3316,24 +3430,6 @@ Legend.prototype.getClass = function(n, withCssClass) {
 
 	index.unshift("");
 	return (index.join(" r") + (withCssClass ? index.join(" q"): "")).trim();
-};
-
-/**
- * Sprintf like function
- * @source http://stackoverflow.com/a/4795914/805649
- * @return String
- */
-String.prototype.format = function () {
-	"use strict";
-
-	var formatted = this;
-	for (var prop in arguments[0]) {
-		if (arguments[0].hasOwnProperty(prop)) {
-			var regexp = new RegExp("\\{" + prop + "\\}", "gi");
-			formatted = formatted.replace(regexp, arguments[0][prop]);
-		}
-	}
-	return formatted;
 };
 
 /**
